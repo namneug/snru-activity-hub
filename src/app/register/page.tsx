@@ -12,7 +12,7 @@ export default function RegisterPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [role, setRole] = useState('student');
-  const [form, setForm] = useState({ email: '', password: '', confirmPassword: '', name: '', id: '', major: 'นวัตกรรมและคอมพิวเตอร์ศึกษา' });
+  const [form, setForm] = useState({ email: '', password: '', confirmPassword: '', name: '', id: '', major: '' });
   const set = (key: string, val: string) => setForm(p => ({ ...p, [key]: val }));
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -50,7 +50,6 @@ export default function RegisterPage() {
         </div>
 
         <div className="p-8">
-          {/* Role selector */}
           <div className="flex bg-gray-100 p-1.5 rounded-2xl mb-8 border border-gray-200">
             {(['student', 'lecturer'] as const).map(r => (
               <button key={r} type="button" onClick={() => setRole(r)}
@@ -101,7 +100,7 @@ export default function RegisterPage() {
                 <div className="space-y-1">
                   <label className="text-sm font-semibold text-gray-600 ml-1">สาขาวิชา</label>
                   <div className="relative"><div className={iconCls}><BookOpen className="text-gray-400" size={18}/></div>
-                    <input type="text" className="w-full pl-12 pr-4 py-3 bg-gray-100 rounded-xl border border-gray-200 text-gray-500 cursor-not-allowed" value={form.major} readOnly />
+                    <input required type="text" placeholder="เช่น นวัตกรรมและคอมพิวเตอร์ศึกษา" className={inputCls} value={form.major} onChange={e => set('major', e.target.value)} />
                   </div>
                 </div>
               </div>
