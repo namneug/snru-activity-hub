@@ -14,6 +14,7 @@ export default function ScanQRPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isProcessingRef = useRef(false);
+  const jsQRRef = useRef<any>(null);
 
   const [status, setStatus] = useState<'idle' | 'scanning' | 'evaluate' | 'success' | 'error' | 'duplicate'>('idle');
   const [message, setMessage] = useState('');
@@ -21,11 +22,20 @@ export default function ScanQRPage() {
   const [studentName, setStudentName] = useState('');
   const [studentId, setStudentId] = useState('');
   const [scanning, setScanning] = useState(false);
-
   const [scannedActivity, setScannedActivity] = useState<{ id: string; name: string } | null>(null);
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // โหลด jsQR สำหรับ iPhone Safari
+  useEffect(() => {
+    if (!('BarcodeDetector' in window)) {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js';
+      script.onload = () => { jsQRRef.current = (window as any).jsQR; };
+      document.head.appendChild(script);
+    }
+  }, []);
 
   useEffect(() => {
     const n = localStorage.getItem('user_name');
@@ -33,6 +43,12 @@ export default function ScanQRPage() {
     const r = localStorage.getItem('user_role');
     if (!n || r !== 'student') { router.push('/'); return; }
     setStudentName(n); setStudentId(id || '');
+
+    // ถ้ามี ?id= ใน URL ให้เช็คอินอัตโนมัติ
+    const params = new URLSearchParams(window.location.search);
+    const actId = params.get('id');
+    if (actId) { handleQRResult(actId); }
+
     return () => stopCamera();
   }, [router]);
 
@@ -69,6 +85,7 @@ export default function ScanQRPage() {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0);
+
     if ('BarcodeDetector' in window) {
       const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
       detector.detect(canvas).then((barcodes: any[]) => {
@@ -77,30 +94,46 @@ export default function ScanQRPage() {
           handleQRResult(barcodes[0].rawValue);
         }
       }).catch(() => {});
+    } else if (jsQRRef.current) {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQRRef.current(imageData.data, canvas.width, canvas.height);
+      if (code && code.data && !isProcessingRef.current) {
+        isProcessingRef.current = true;
+        handleQRResult(code.data);
+      }
     }
   };
 
   const handleQRResult = async (data: string) => {
     stopCamera();
     try {
-      let parsed: any;
-      try { parsed = JSON.parse(data); } catch { parsed = { activityId: data }; }
+      let activityId = '';
+      let activityName = '';
 
-      const activityId = parsed.activityId || parsed.id || data;
-      let activityName = parsed.activityName || parsed.name || '';
+      if (data.startsWith('http')) {
+        try {
+          const url = new URL(data);
+          activityId = url.searchParams.get('id') || '';
+        } catch { activityId = data; }
+      } else {
+        let parsed: any;
+        try { parsed = JSON.parse(data); } catch { parsed = { activityId: data }; }
+        activityId = parsed.activityId || parsed.id || data;
+        activityName = parsed.activityName || parsed.name || '';
+      }
 
-      // ดึงชื่อกิจกรรมจาก Firestore ถ้ายังไม่มี
+      if (!activityId) {
+        setStatus('error'); setMessage('ไม่พบรหัสกิจกรรมใน QR Code');
+        isProcessingRef.current = false;
+        return;
+      }
+
       if (!activityName || activityName === activityId) {
         try {
           const actDoc = await getDoc(doc(db, 'activities', activityId));
-          if (actDoc.exists()) {
-            activityName = actDoc.data().name || activityId;
-          } else {
-            activityName = activityId;
-          }
-        } catch {
-          activityName = activityId;
-        }
+          if (actDoc.exists()) { activityName = actDoc.data().name || activityId; }
+          else { activityName = activityId; }
+        } catch { activityName = activityId; }
       }
 
       const dupQ = query(collection(db, 'checkins'), where('studentId', '==', studentId), where('activityId', '==', activityId));
