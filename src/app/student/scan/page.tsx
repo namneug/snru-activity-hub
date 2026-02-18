@@ -28,7 +28,7 @@ export default function ScanQRPage() {
     const r = localStorage.getItem('user_role');
     if (!n || r !== 'student') { router.push('/'); return; }
     setStudentName(n); setStudentId(id || '');
-    return () => stopScanner();
+    return () => { stopScanner(); };
   }, [router]);
 
   const stopScanner = async () => {
