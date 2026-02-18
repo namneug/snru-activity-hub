@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { db } from '../../../firebase/config';
 import { collection, addDoc, serverTimestamp, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
@@ -9,23 +9,18 @@ import StarRating from '../../../components/StarRating';
 
 export default function ScanQRPage() {
   const router = useRouter();
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const isProcessingRef = useRef(false);
+  const scannerRef = useRef<any>(null);
 
   const [status, setStatus] = useState<'idle' | 'scanning' | 'evaluate' | 'success' | 'error' | 'duplicate'>('idle');
   const [message, setMessage] = useState('');
   const [cameraError, setCameraError] = useState('');
   const [studentName, setStudentName] = useState('');
   const [studentId, setStudentId] = useState('');
-  const [scanning, setScanning] = useState(false);
-
   const [scannedActivity, setScannedActivity] = useState<{ id: string; name: string } | null>(null);
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const processingRef = useRef(false);
 
   useEffect(() => {
     const n = localStorage.getItem('user_name');
@@ -33,95 +28,87 @@ export default function ScanQRPage() {
     const r = localStorage.getItem('user_role');
     if (!n || r !== 'student') { router.push('/'); return; }
     setStudentName(n); setStudentId(id || '');
-    return () => stopCamera();
+    return () => stopScanner();
   }, [router]);
 
-  const stopCamera = useCallback(() => {
-    if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    setScanning(false);
-  }, []);
+  const stopScanner = async () => {
+    if (scannerRef.current) {
+      try {
+        const state = scannerRef.current.getState();
+        if (state === 2) { await scannerRef.current.stop(); }
+        scannerRef.current.clear();
+      } catch (e) { console.log('stop error', e); }
+      scannerRef.current = null;
+    }
+  };
 
-  const startCamera = async () => {
+  const startScanner = async () => {
+    setCameraError(''); setStatus('scanning'); setMessage('');
+    processingRef.current = false;
     try {
-      setCameraError(''); setStatus('scanning'); setMessage('');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play(); }
-      setScanning(true);
-      scanIntervalRef.current = setInterval(() => scanFrame(), 500);
+      const { Html5Qrcode } = await import('html5-qrcode');
+
+      await stopScanner();
+
+      const scanner = new Html5Qrcode('qr-reader');
+      scannerRef.current = scanner;
+
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 220, height: 220 }, aspectRatio: 1.0 },
+        (decodedText: string) => {
+          if (processingRef.current) return;
+          processingRef.current = true;
+          stopScanner().then(() => handleQRResult(decodedText));
+        },
+        () => {}
+      );
     } catch (err: any) {
-      if (err.name === 'NotAllowedError') setCameraError('กรุณาอนุญาตการเข้าถึงกล้องในการตั้งค่าเบราว์เซอร์');
-      else if (err.name === 'NotFoundError') setCameraError('ไม่พบกล้องในอุปกรณ์นี้');
-      else setCameraError('ไม่สามารถเปิดกล้องได้ กรุณาลองใหม่');
+      console.error('Camera error:', err);
+      setCameraError('ไม่สามารถเปิดกล้องได้ กรุณาอนุญาตการเข้าถึงกล้อง');
       setStatus('idle');
     }
   };
 
-  const scanFrame = () => {
-    if (!videoRef.current || !canvasRef.current || isProcessingRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx || video.readyState !== video.HAVE_ENOUGH_DATA) return;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
-
-    if ('BarcodeDetector' in window) {
-      const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
-      detector.detect(canvas).then((barcodes: any[]) => {
-        if (barcodes.length > 0 && !isProcessingRef.current) {
-          isProcessingRef.current = true;
-          handleQRResult(barcodes[0].rawValue);
-        }
-      }).catch(() => {});
-    }
-  };
-
   const handleQRResult = async (data: string) => {
-    stopCamera();
-    try {
-      let parsed: any;
-      try { parsed = JSON.parse(data); } catch { parsed = { activityId: data }; }
+    let activityId = data.trim();
 
-      const activityId = parsed.activityId || parsed.id || data;
-      let activityName = parsed.activityName || parsed.name || '';
-
-      // ดึงชื่อกิจกรรมจาก Firestore ถ้ายังไม่มี
-      if (!activityName || activityName === activityId) {
-        try {
-          const actDoc = await getDoc(doc(db, 'activities', activityId));
-          if (actDoc.exists()) {
-            activityName = actDoc.data().name || activityId;
-          } else {
-            activityName = activityId;
-          }
-        } catch {
-          activityName = activityId;
-        }
-      }
-
-      const dupQ = query(collection(db, 'checkins'), where('studentId', '==', studentId), where('activityId', '==', activityId));
-      const dupSnap = await getDocs(dupQ);
-      if (!dupSnap.empty) {
-        setStatus('duplicate');
-        setMessage('คุณเคยเช็คอินกิจกรรม "' + activityName + '" แล้ว');
-        isProcessingRef.current = false;
-        return;
-      }
-
-      setScannedActivity({ id: activityId, name: activityName });
-      setRating(0); setComment('');
-      setStatus('evaluate');
-      isProcessingRef.current = false;
-    } catch (err) {
-      console.error('QR Error:', err);
-      setStatus('error'); setMessage('เกิดข้อผิดพลาดในการอ่าน QR Code');
-      isProcessingRef.current = false;
+    if (activityId.startsWith('http')) {
+      try { activityId = new URL(activityId).searchParams.get('id') || activityId; } catch {}
     }
+    if (activityId.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(activityId);
+        activityId = parsed.activityId || parsed.id || activityId;
+      } catch {}
+    }
+
+    if (!activityId) {
+      setStatus('error'); setMessage('ไม่พบรหัสกิจกรรมใน QR Code');
+      processingRef.current = false;
+      return;
+    }
+
+    let activityName = '';
+    try {
+      const actDoc = await getDoc(doc(db, 'activities', activityId));
+      if (actDoc.exists()) { activityName = actDoc.data().name || activityId; }
+      else { activityName = activityId; }
+    } catch { activityName = activityId; }
+
+    const dupQ = query(collection(db, 'checkins'), where('studentId', '==', studentId), where('activityId', '==', activityId));
+    const dupSnap = await getDocs(dupQ);
+    if (!dupSnap.empty) {
+      setStatus('duplicate');
+      setMessage('คุณเคยเช็คอินกิจกรรม "' + activityName + '" แล้ว');
+      processingRef.current = false;
+      return;
+    }
+
+    setScannedActivity({ id: activityId, name: activityName });
+    setRating(0); setComment('');
+    setStatus('evaluate');
+    processingRef.current = false;
   };
 
   const handleSubmitEvaluation = async () => {
@@ -148,25 +135,27 @@ export default function ScanQRPage() {
   };
 
   const resetScan = () => {
+    stopScanner();
     setStatus('idle'); setMessage(''); setCameraError('');
     setScannedActivity(null); setRating(0); setComment('');
-    isProcessingRef.current = false;
+    processingRef.current = false;
   };
 
   return (
     <div className="min-h-screen bg-[#f8fafc] font-sans text-gray-800">
       <div className="bg-[#1e553d] p-6 text-white flex items-center gap-4 shadow-lg">
-        <button onClick={() => { stopCamera(); router.push('/student/dashboard'); }} className="bg-white/20 p-2 rounded-xl hover:bg-white/30 transition"><ArrowLeft size={20}/></button>
+        <button onClick={() => { stopScanner(); router.push('/student/dashboard'); }} className="bg-white/20 p-2 rounded-xl hover:bg-white/30 transition"><ArrowLeft size={20}/></button>
         <div><h1 className="text-xl font-bold">สแกน QR Code</h1><p className="text-green-100 text-xs opacity-80">บันทึกการเข้าร่วมกิจกรรม</p></div>
       </div>
       <div className="p-6 max-w-lg mx-auto">
+
         {status === 'idle' && (
           <div className="text-center space-y-6">
             <div className="bg-white rounded-[2rem] p-8 shadow-sm border border-gray-100">
               <div className="bg-[#1e553d] text-white w-20 h-20 rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-lg"><Camera size={40}/></div>
               <h2 className="text-xl font-bold text-gray-800 mb-2">พร้อมสแกน</h2>
               <p className="text-gray-400 text-sm mb-6">กดปุ่มด้านล่างเพื่อเปิดกล้องสแกน QR Code</p>
-              <button onClick={startCamera} className="w-full bg-[#1e553d] text-white py-4 rounded-2xl font-bold text-lg hover:bg-[#16422f] transition shadow-lg active:scale-[0.98] flex items-center justify-center gap-3"><Camera size={24}/> เปิดกล้องสแกน</button>
+              <button onClick={startScanner} className="w-full bg-[#1e553d] text-white py-4 rounded-2xl font-bold text-lg hover:bg-[#16422f] transition shadow-lg active:scale-[0.98] flex items-center justify-center gap-3"><Camera size={24}/> เปิดกล้องสแกน</button>
               <button onClick={handleManualInput} className="mt-4 text-[#1e553d] text-sm font-medium hover:underline">กรอกรหัสกิจกรรมด้วยตัวเอง</button>
             </div>
             {cameraError && (
@@ -177,27 +166,19 @@ export default function ScanQRPage() {
             )}
           </div>
         )}
+
         {status === 'scanning' && (
           <div className="space-y-4">
-            <div className="bg-black rounded-[2rem] overflow-hidden relative shadow-xl">
-              <video ref={videoRef} className="w-full aspect-square object-cover" playsInline muted />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-56 h-56 border-2 border-white/30 rounded-3xl relative">
-                  <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-[#4ade80] rounded-tl-xl" />
-                  <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-[#4ade80] rounded-tr-xl" />
-                  <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-[#4ade80] rounded-bl-xl" />
-                  <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-[#4ade80] rounded-br-xl" />
-                </div>
-              </div>
-              <div className="absolute bottom-4 left-0 right-0 text-center"><span className="bg-black/60 text-white px-4 py-2 rounded-full text-sm backdrop-blur-sm inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin"/> กำลังสแกน...</span></div>
+            <div className="rounded-[2rem] overflow-hidden shadow-xl">
+              <div id="qr-reader" style={{width:'100%'}}></div>
             </div>
-            <canvas ref={canvasRef} className="hidden"/>
             <div className="flex gap-3">
-              <button onClick={() => { stopCamera(); resetScan(); }} className="flex-1 bg-gray-100 text-gray-700 py-3 rounded-2xl font-bold hover:bg-gray-200 transition">ยกเลิก</button>
-              <button onClick={() => { stopCamera(); handleManualInput(); }} className="flex-1 bg-[#1e553d] text-white py-3 rounded-2xl font-bold hover:bg-[#16422f] transition">กรอกรหัสเอง</button>
+              <button onClick={resetScan} className="flex-1 bg-gray-100 text-gray-700 py-3 rounded-2xl font-bold hover:bg-gray-200 transition">ยกเลิก</button>
+              <button onClick={() => { stopScanner(); handleManualInput(); }} className="flex-1 bg-[#1e553d] text-white py-3 rounded-2xl font-bold hover:bg-[#16422f] transition">กรอกรหัสเอง</button>
             </div>
           </div>
         )}
+
         {status === 'evaluate' && scannedActivity && (
           <div className="bg-white rounded-[2rem] p-8 shadow-sm border border-gray-100 text-center">
             <div className="bg-green-100 text-green-600 w-16 h-16 rounded-full mx-auto flex items-center justify-center mb-4"><CheckCircle size={36}/></div>
@@ -214,6 +195,7 @@ export default function ScanQRPage() {
             <button onClick={resetScan} className="mt-3 text-gray-400 text-sm hover:text-gray-600">ยกเลิก</button>
           </div>
         )}
+
         {status === 'success' && (
           <div className="text-center bg-white rounded-[2rem] p-8 shadow-sm border border-green-100">
             <div className="bg-green-100 text-green-600 w-20 h-20 rounded-full mx-auto flex items-center justify-center mb-6"><CheckCircle size={48}/></div>
@@ -223,6 +205,7 @@ export default function ScanQRPage() {
             <button onClick={() => router.push('/student/dashboard')} className="w-full mt-3 bg-gray-100 text-gray-700 py-3 rounded-2xl font-medium hover:bg-gray-200 transition">กลับหน้าหลัก</button>
           </div>
         )}
+
         {status === 'duplicate' && (
           <div className="text-center bg-white rounded-[2rem] p-8 shadow-sm border border-yellow-100">
             <div className="bg-yellow-100 text-yellow-600 w-20 h-20 rounded-full mx-auto flex items-center justify-center mb-6"><AlertTriangle size={48}/></div>
@@ -232,6 +215,7 @@ export default function ScanQRPage() {
             <button onClick={() => router.push('/student/dashboard')} className="w-full mt-3 bg-gray-100 text-gray-700 py-3 rounded-2xl font-medium hover:bg-gray-200 transition">กลับหน้าหลัก</button>
           </div>
         )}
+
         {status === 'error' && (
           <div className="text-center bg-white rounded-[2rem] p-8 shadow-sm border border-red-100">
             <div className="bg-red-100 text-red-600 w-20 h-20 rounded-full mx-auto flex items-center justify-center mb-6"><XCircle size={48}/></div>

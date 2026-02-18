@@ -167,7 +167,7 @@ export default function LecturerDashboard() {
   };
 
   const qrURL = (id: string, n: string) =>
-    `https://api.qrserver.com/v1/create-qr-code/?size=300x300\https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(`https://snru-activity-hub.web.app/student/scan?id=${id}`)}data=${encodeURIComponent(JSON.stringify({activityId:id,activityName:n}))}`;
+    `https://quickchart.io/qr?size=300&text=${encodeURIComponent(id)}`;
 
   return (
     <div className="min-h-screen bg-[#f8fafc] font-sans text-gray-800">
